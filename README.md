@@ -30,7 +30,7 @@ kit = zcmodkit.open()                          # auto-detects Steam/Epic install
 kit = zcmodkit.open("D:/Games/ZeroCompany")    # explicit path
 ```
 
-Returns a `ModKit` object, your read-only interface to the game's data and the entry point for creating mods.
+Returns a `ModKit` object, a read-only interface to the game's data and the entry point for creating mods.
 
 ### Creating a Mod
 
@@ -110,14 +110,6 @@ mod.build("./output")
 ```
 
 This builds the .pak without installing it in your game.
-
-### Describing a Mod
-
-```python
-print(mod.describe())
-```
-
-Outputs a human-readable summary of all queued changes before you install.
 
 ### Sharing a Mod as a Recipe
 
