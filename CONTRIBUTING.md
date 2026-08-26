@@ -18,7 +18,7 @@ Thank you for contributing! Before forking, please review below to make sure you
 
 If you are exposing a new category of game data (e.g. maps, missions), make sure to do the following:
 
-1. Add a module under domains/
+1. Add a module under `domains/`
 2. Expose it on the `Mod` object so users get `mod.yourdomain.target.method()` access.
 3. Update the README to include this new functionality.
 
