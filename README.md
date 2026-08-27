@@ -1,6 +1,6 @@
 # ZeroCompany ModKit
 
-A Python toolkit for creating and installing mods for Zero Company with the intent of keeping the process as simple as possible.
+An unofficial Python toolkit for creating and installing mods for Zero Company with the intent of keeping the process as simple as possible.
 
 ## Install
 
@@ -140,3 +140,7 @@ Just delete the mod's `.pak` file. The base game is never modified.
 
 - Python 3.10+
 - Zero Company installed via Steam or Epic
+
+## Disclaimer
+
+ZeroCompany ModKit is an independent, community-driven project and is not affiliated with, endorsed by, or sponsored by Electronic Arts (EA), Respawn Entertainment, or any of their subsidiaries. Star Wars: Zero Company and all related trademarks are the property of their respective owners. This project is built by fans, for fans, and exists solely to support the modding community.
