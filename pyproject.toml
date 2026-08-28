@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zcmodkit"
+version = "0.1.0"
+description = "An unofficial Python toolkit for creating and installing Star Wars: Zero Company mods"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = ["unreal", "modding", "iostore", "star-wars", "zero-company"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Games/Entertainment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "blake3>=0.4",   # IoStore chunk hashes
+    "cityhash>=0.4", # IoStore chunk / package ids
+    "repak>=0.2",    # writes the stub .pak beside each container
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/jonah-legg/zcmodkit"
+
+[tool.setuptools.packages.find]
+include = ["zcmodkit*"]
+
+[tool.setuptools.package-data]
+# Schemas for the game build these mappings were dumped from. Needed to edit
+# values; text edits work without them.
+zcmodkit = ["data/*.usmap", "data/BUILD.txt"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PERF", "A"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["game: requires Star Wars: Zero Company to be installed"]

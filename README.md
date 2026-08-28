@@ -1,6 +1,6 @@
 # ZeroCompany ModKit
 
-An unofficial Python toolkit for creating and installing mods for Zero Company with the intent of keeping the process as simple as possible.
+An unofficial Python toolkit for creating and installing mods for Star Wars: Zero Company, with the intent of keeping the process as simple as possible.
 
 ## Install
 
@@ -14,132 +14,120 @@ pip install zcmodkit
 import zcmodkit
 
 kit = zcmodkit.open()
-mod = kit.create_mod("no_respec")
-mod.operatives.all.disable_respec()
+mod = kit.create_mod("hello_menu")
+
+# Change a value in one of the game's data tables.
+mod.table("/Game/Game/GameData/DynamicGACosts/DT_CostsTable_v4").set(
+    "BitReactor.AbilityCost.BasicAttack", "ActionPointCost", 0.0
+)
+
+# ...and some on-screen text, in the same mod.
+mod.asset("/Game/Game/UI/Localization/UI_System_Strings").replace_text(
+    "NEW CAMPAIGN", "NEW MODDED CAMPAIGN"
+)
+
 mod.install()
 ```
 
-This is the pattern of all mods: open, create, edit, install.
+Launch the game; basic attacks are free and the main menu button reads differently. This is the pattern of all mods: open, create, edit, install.
 
 ## Core Concepts
 
 ### Opening the Kit
 
 ```python
-kit = zcmodkit.open()                          # auto-detects Steam/Epic install
-kit = zcmodkit.open("D:/Games/ZeroCompany")    # explicit path
+kit = zcmodkit.open()  # auto-detects Steam/Epic
+kit = zcmodkit.open("D:/Games/Star Wars Zero Company")
 ```
 
-Returns a `ModKit` object, a read-only interface to the game's data and the entry point for creating mods.
+A `ModKit` is a read-only view of the installed game and the entry point for creating mods.
 
-### Creating a Mod
+### Finding things
 
 ```python
-mod = kit.create_mod("no_respec")
+kit.has_package("/Game/Game/UI/Localization/UI_System_Strings")  # True
+kit.read_package(path)  # raw cooked bytes
+kit.text.find("CONTINUE")  # [(namespace, key, value), ...] from the game's text table
 ```
+
+`kit.text` is the shipped localization table. It is the quickest way to find a piece of on-screen text and the asset it belongs to.
+
+### Editing assets
+
+```python
+asset = mod.asset("/Game/Game/UI/Localization/UI_System_Strings")
+asset.replace_text("QUIT", "RUN AWAY")  # any length
+```
+
+Gameplay tags, class names and object paths are not text in the export data - they live in the package's name map, and the asset refers to them by index. Repoint one at another name the package already uses:
+
+```python
+spec = mod.asset(".../CPD_TacticalSpec_Padawan")
+spec.names  # every name the package refers to
+spec.retarget_name(gate_tag, slot_tag, expect=1)
+```
+
+Nothing is resized and no name is added, so the asset stays exactly the same size. `expect` asserts how many references should change, which is worth setting when you know.
+
+### Editing values
+
+Most of the game's tuning lives in DataTables: ability costs, weapon stats, upgrade curves. Open one by its package path and set fields by row and name:
+
+```python
+costs = mod.table("/Game/Game/GameData/DynamicGACosts/DT_CostsTable_v4")
+
+costs.get("BitReactor.AbilityCost.BasicAttack", "ActionPointCost")  # 1.0
+costs.set("BitReactor.AbilityCost.BasicAttack", "ActionPointCost", 0.0)
+costs.set_all("AdvantageCost", 0.0)  # every row that has the field
+```
+
+To find your way around a table before changing anything:
+
+```python
+len(costs)  # how many rows
+list(costs.rows)  # row names
+costs.row("BitReactor.AbilityCost.BasicAttack").keys()  # field names
+```
+
+Numbers are fixed width, so setting one never moves anything else in the asset.
+
+Cooked assets do not record property names, so this needs the schemas for the build you are modding. Those ship with zcmodkit, and there is nothing to download. If the game is patched and a struct's layout changes, the table walk stops landing exactly on the end of the asset and the edit is refused rather than written to the wrong offset. Thus, a stale mappings file produces a clear error, never a silently wrong value. Text edits do not use mappings and keep working regardless.
 
 ### Installing
 
 ```python
-mod.install()                   # build and place into game's mod folder
+mod.install()  # build and copy into the game's ~mods folder
+mod.build("./out")  # build without installing
+mod.uninstall()  # remove it again
 ```
 
-## Making Changes
+Installing writes three files - `.utoc`, `.ucas` and a stub `.pak` - into
+`SWZeroCompany/Content/Paks/~mods/`. The base game is never modified.
 
-### Operatives
+## Load Order
+
+When two mods edit the same asset, only one of them is loaded. **Lower priority wins.**
 
 ```python
-mod.operatives.all                  # target every operative
-mod.operatives.hawks                # target Hawks 
-mod.operatives.trick                # target Trick
+kit.create_mod("overrides_everything", priority=0)  # 000_overrides_everything_P
+kit.create_mod("ordinary")  # 100_ordinary_P  (the default)
+kit.create_mod("last_resort", priority=999)  # 999_last_resort_P
 ```
 
-Each returns a handle with domain-specific methods:
+To see what is installed and whether anything is being shadowed:
 
 ```python
-mod.operatives.hawks.set_health(200)
-mod.operatives.hawks.set_movement(8)
-mod.operatives.hawks.disable_respec()
+for mod in kit.installed_mods():  # best priority first
+    print(mod.priority, mod.name, mod.assets)
+
+for asset, mods in kit.conflicts().items():
+    print(f"{asset}: {mods[0].name} wins over {[m.name for m in mods[1:]]}")
 ```
-
-Use `.all` to apply across every operative:
-
-```python
-mod.operatives.all.disable_respec()
-```
-
-### Weapons
-
-```python
-mod.weapons.dc15a.set_damage(45)
-mod.weapons.dc15a.set_range(12)
-```
-
-### Abilities
-
-```python
-mod.abilities.grapple.set_cooldown(1)
-mod.abilities.overwatch.set_range(15)
-```
-
-### Direct Table Access
-
-This tool is not all-encompassing, and there will be fields that aren't accessible through the abstracted layer. For advanced users that want to have more granular access, you can edit the tables directly:
-
-```python
-mod.table("DT_OperativeBaseStats").set("Hawks", "MaxHP", 200)
-mod.table("DT_OperativeBaseStats").set_all("bCanRespec", False)
-mod.table("DT_MissionRewards").multiply("*", "XPGained", 2.0)
-mod.table("DT_SomeTable").add("RowName", "SomeInt", 10)
-```
-
-To discover table and field names:
-
-```python
-kit.tables()                                     
-kit.table("DT_OperativeBaseStats").rows()        
-kit.table("DT_OperativeBaseStats").row("Hawks")  
-```
-
-## Other Features
-
-### Building Without Installing
-
-```python
-mod.build("./output")
-```
-
-This builds the .pak without installing it in your game.
-
-### Sharing a Mod as a Recipe
-
-To create a recipe:
-
-```python
-import zcmodkit
-
-kit = zcmodkit.open()
-mod = kit.create_mod("hardcore")
-mod.operatives.all.set_health(60)
-mod.operatives.all.disable_respec()
-mod.export("hardcore.json")
-```
-
-To install a recipe:
-
-```python
-import zcmodkit
-zcmodkit.open().install("hardcore.json")
-```
-
-### Uninstalling a Mod
-
-Just delete the mod's `.pak` file. The base game is never modified.
 
 ## Requirements
 
 - Python 3.10+
-- Zero Company installed via Steam or Epic
+- Star Wars: Zero Company installed via Steam or Epic
 
 ## Disclaimer
 
