@@ -18,11 +18,17 @@ Thank you for contributing! Before forking, please review below to make sure you
 
 If you are exposing a new category of game data (e.g. maps, missions), make sure to do the following:
 
-1. Add a module under `domains/`
+1. Add a module under `zcmodkit/domains/`
 2. Expose it on the `Mod` object so users get `mod.yourdomain.target.method()` access.
 3. Update the README to include this new functionality.
 
+File format code belongs in `zcmodkit/formats/`, not `domains/`. Domains are about what a
+modder wants to change; formats are about how Unreal stores it.
+
 ### Testing
+
+Run the suite with `pytest`. Tests that need a real game installation are marked `game`
+and skip automatically without one, so `pytest -m "not game"` works anywhere.
 
 Please make sure you are properly creating tests for your methods. Every method is different, so there isn't a set test coverage or number of tests required, but don't submit a pull request with a bunch of new methods and no tests.
 
