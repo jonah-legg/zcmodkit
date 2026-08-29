@@ -46,7 +46,9 @@ class Mod:
         """Open a cooked asset for editing, by its /Game/... package path."""
         if package_path not in self._assets:
             self._assets[package_path] = AssetEditor(
-                package_path, self.kit.read_package(package_path)
+                package_path,
+                self.kit.read_package(package_path),
+                self.kit.imported_packages(package_path),
             )
         return self._assets[package_path]
 
@@ -68,6 +70,9 @@ class Mod:
         """
         edits: dict[str, bytes] = {p: bytes(a.data) for p, a in self._assets.items()}
         edits.update({p: bytes(t.data) for p, t in self._tables.items()})
+        # add_import can grow an asset's import list, so take it from the
+        # editor where there is one rather than going back to the game.
+        imports = {p: a.imported_packages for p, a in self._assets.items()}
         if not edits:
             raise ValueError("Mod has no changes; nothing to build.")
         writer = IoStoreWriter(container_id=package_id(f"/zcmodkit/{self.name}"))
@@ -77,7 +82,12 @@ class Mod:
                     zen_verify(data)
                 except PackageError as exc:
                     raise PackageError(f"{path}: {exc}") from exc
-            writer.add_package(path, data, companions=self.kit.read_companions(path))
+            writer.add_package(
+                path,
+                data,
+                companions=self.kit.read_companions(path),
+                imports=imports.get(path) or self.kit.imported_packages(path),
+            )
         return list(writer.write(Path(out_dir) / self.basename))
 
     def install(self) -> list[Path]:

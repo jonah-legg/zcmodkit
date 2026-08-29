@@ -30,6 +30,8 @@ FIXED_WIDTH = {
     PropertyType.DOUBLE: 8,
     PropertyType.NAME: 8,  # FName: mapped index + number
     PropertyType.OBJECT: 4,  # package object index
+    PropertyType.WEAK_OBJECT: 4,  # serialized the same way as a hard reference
+    PropertyType.LAZY_OBJECT: 16,  # FUniqueObjectGuid
 }
 
 #: struct format for each numeric type.
@@ -167,11 +169,35 @@ def value_size(data: bytes, at: int, info, mappings: Mappings) -> int:
         return 4 + (abs(length) * 2 if length < 0 else length)
     if kind in (PropertyType.SOFT_OBJECT, PropertyType.ASSET_OBJECT):
         return 12  # FName plus a sub-path FString index
+    if kind == PropertyType.INTERFACE:
+        return 4  # just the object reference
+    if kind == PropertyType.DELEGATE:
+        return 12  # FScriptDelegate: object reference plus a function name
+    if kind == PropertyType.MULTICAST_DELEGATE:
+        # An invocation list of FScriptDelegate. Cooked defaults are normally
+        # empty, since bindings happen at runtime.
+        (count,) = struct.unpack_from("<i", data, at)
+        return 4 + count * 12
     if kind == PropertyType.ARRAY:
         (count,) = struct.unpack_from("<i", data, at)
         cursor = at + 4
         for _ in range(count):
             cursor += value_size(data, cursor, info.inner[0], mappings)
+        return cursor - at
+    if kind in (PropertyType.MAP, PropertyType.SET):
+        # Both start with a count of keys to remove, which is always zero in
+        # cooked data because there is no base object to remove them from.
+        (removals,) = struct.unpack_from("<i", data, at)
+        if removals:
+            raise PropertyError(
+                f"{info!r} wants to remove {removals} keys, which cooked data "
+                "should never do"
+            )
+        (count,) = struct.unpack_from("<i", data, at + 4)
+        cursor = at + 8
+        for _ in range(count):
+            for inner in info.inner:
+                cursor += value_size(data, cursor, inner, mappings)
         return cursor - at
     raise PropertyError(f"unsupported property type {info!r}")
 

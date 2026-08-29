@@ -265,7 +265,15 @@ class Mappings:
             raise MappingsError(f"no schema for {name!r} in these mappings") from None
 
     def properties(self, name: str) -> list[PropertyInfo]:
-        """A schema's properties, inherited ones included, base class first."""
+        """A schema's properties, inherited ones included, base class first.
+
+        A .usmap numbers each schema's properties from zero, but serialization
+        numbers them straight through the whole chain. So a class's own
+        properties start after however many its ancestors have between them,
+        and every inherited index gets shifted up to match. Without that, a
+        derived class collides with its own base and the walk reads the wrong
+        property.
+        """
         chain, current = [], name
         seen = set()
         while current and current not in seen:
@@ -275,9 +283,17 @@ class Mappings:
                 break
             chain.append(schema)
             current = schema.super_name
+
         out: list[PropertyInfo] = []
+        base = 0
         for schema in reversed(chain):
-            out.extend(schema.properties)
+            out.extend(
+                PropertyInfo(
+                    prop.name, base + prop.schema_index, prop.array_size, prop.type
+                )
+                for prop in schema.properties
+            )
+            base += schema.property_count
         return out
 
     def __repr__(self) -> str:
