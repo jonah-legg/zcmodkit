@@ -1,4 +1,4 @@
-"""Change a main menu button. The new text can be any length."""
+"""Change a main menu button."""
 
 import zcmodkit
 
