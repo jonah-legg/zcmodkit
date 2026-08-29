@@ -5,13 +5,26 @@ that only holds true for one hand-picked asset.
 """
 
 import random
+import struct
 
 import pytest
 
 from zcmodkit.domains import AssetEditor
 from zcmodkit.formats import IoStoreReader
 from zcmodkit.formats.iostore import CHUNK_EXPORT_BUNDLE_DATA, package_id
-from zcmodkit.formats.zen import PackageError, ZenPackage, verify
+from zcmodkit.formats.zen import (
+    EXPORT_REF_FIELDS,
+    IMPORT_PACKAGE,
+    LAYOUT_ORDER,
+    PackageError,
+    ZenPackage,
+    name_hash,
+    read_name_map,
+    splice_section,
+    split_import,
+    verify,
+    write_name_map,
+)
 
 pytestmark = pytest.mark.game
 
@@ -131,3 +144,101 @@ def _unpack_i32(buf, at):
     import struct
 
     return struct.unpack_from("<i", buf, at)
+
+
+def test_name_hashes_match_what_the_game_stored(kit):
+    """The check that makes writing a new name safe.
+
+    If the hash is right for every name the game shipped, it is right for one
+    we add. This is what add_name rests on.
+    """
+    checked = 0
+    for r, chunk in _sample(kit, seed=10):
+        data = r.read_chunk(chunk)
+        pkg = ZenPackage(data)
+        stored = read_name_map(data, pkg.name_map.start)
+        assert stored.hashes == [name_hash(n) for n in stored.names]
+        checked += len(stored.names)
+    assert checked > 1000, f"only checked {checked} names"
+
+
+def test_rebuilding_a_name_map_is_byte_identical(kit):
+    """Writing a map back out unchanged has to give the same bytes."""
+    for r, chunk in _sample(kit, seed=11):
+        data = r.read_chunk(chunk)
+        stored = read_name_map(data, ZenPackage(data).name_map.start)
+        assert write_name_map(stored.names) == bytes(data[stored.start : stored.end])
+
+
+def test_splicing_nothing_leaves_real_packages_alone(kit):
+    """Every section boundary in real assets, spliced with nothing."""
+    for r, chunk in _sample(kit, seed=12):
+        data = r.read_chunk(chunk)
+        pkg = ZenPackage(data)
+        for section in LAYOUT_ORDER:
+            start, end = pkg.section_range(section)
+            for at in (start, end):
+                assert bytes(splice_section(data, section, at, 0, b"")) == data
+
+
+def _package_import_refs(pkg, data):
+    """Every package-import reference in a package, as (package, hash) slots."""
+    out = []
+
+    def one(value):
+        kind, package_index, hash_index = split_import(value)
+        if kind == IMPORT_PACKAGE:
+            out.append((package_index, hash_index))
+
+    for value in pkg.imports:
+        one(value)
+    for i in range(len(pkg.exports)):
+        for field in EXPORT_REF_FIELDS:
+            one(struct.unpack_from("<Q", data, pkg.export_entry_offset(i) + field)[0])
+    return out
+
+
+def test_adding_an_import_keeps_every_other_one_pointing_where_it_did(kit):
+    """The one that matters.
+
+    Imported package ids are held in ascending order, so a new one usually
+    lands in the middle and shifts everything after it. Every reference is
+    resolved back to a real (package id, export hash) pair before and after,
+    and the two sets have to agree.
+    """
+    new_path = (
+        "/Game/Game/Customizations/Characters/Common/Specialization/Tactical"
+        "/CPD_TacticalSpec_Padawan"
+    )
+    new_id = package_id(new_path)
+    tested = inserted_in_the_middle = 0
+    for r, chunk in _sample(kit, seed=13, n=200):
+        data = r.read_chunk(chunk)
+        pkg = verify(data)
+        ids = list(r.imported_packages(chunk.package_id))
+        if not ids or new_id in ids:
+            continue
+        tested += 1
+        before = {
+            (ids[p], pkg.public_export_hashes[h])
+            for p, h in _package_import_refs(pkg, data)
+        }
+
+        editor = AssetEditor("x", data, ids)
+        editor.add_import(new_path, 0x57ADF4A06467B5FA)
+        grown = verify(editor.data)
+        after = {
+            (editor.imported_packages[p], grown.public_export_hashes[h])
+            for p, h in _package_import_refs(grown, editor.data)
+        }
+
+        assert editor.imported_packages == sorted(editor.imported_packages)
+        assert before <= after, "an existing import now points somewhere else"
+        assert editor.data[grown.header_size :] == data[pkg.header_size :]
+        assert grown.names == pkg.names
+        assert len(grown.imported_package_tail) == len(editor.imported_packages)
+        at = editor.imported_packages.index(new_id)
+        inserted_in_the_middle += 0 < at < len(ids)
+
+    assert tested > 50, f"only {tested} packages had imports to work with"
+    assert inserted_in_the_middle > 20, "never hit the case that needs renumbering"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import struct
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -18,6 +19,7 @@ from .formats import (
     package_id,
 )
 from .formats.iostore import CHUNK_EXPORT_BUNDLE_DATA
+from .formats.zen import ZenPackage
 from .mod import DEFAULT_PRIORITY, Mod
 
 __version__ = "0.1.0"
@@ -113,6 +115,52 @@ class ModKit:
                 if c.type != CHUNK_EXPORT_BUNDLE_DATA
             ]
         raise KeyError(f"{package_path} is not in any container")
+
+    def imported_packages(self, package_path: str) -> list[int]:
+        """The package ids a package depends on, from the game's own header.
+
+        A mod has to pass these along or the package it ships will not load.
+        """
+        pid = package_id(package_path)
+        for r in self.containers:
+            if pid in r.by_package:
+                return r.imported_packages(pid)
+        raise KeyError(f"{package_path} is not in any container")
+
+    def public_exports(self, package_path: str) -> dict[str, int]:
+        """The objects in a package that other packages are allowed to import.
+
+        Keyed by object name, valued by the hash the importer has to quote.
+        Exports with no hash are private to the package and left out.
+        """
+        data = self.read_package(package_path)
+        pkg = ZenPackage(data)
+        out = {}
+        for i in range(len(pkg.exports)):
+            at = pkg.export_entry_offset(i)
+            (name_index,) = struct.unpack_from("<I", data, at + 16)
+            (export_hash,) = struct.unpack_from("<Q", data, at + 56)
+            if export_hash and name_index < len(pkg.names):
+                out[pkg.names[name_index]] = export_hash
+        return out
+
+    def public_export_hash(
+        self, package_path: str, object_name: str | None = None
+    ) -> int:
+        """The hash needed to import one object out of a package.
+
+        Defaults to the object named after the package itself, which is the
+        main asset and nearly always the one worth importing.
+        """
+        exports = self.public_exports(package_path)
+        wanted = object_name or package_path.rsplit("/", 1)[-1]
+        try:
+            return exports[wanted]
+        except KeyError:
+            raise KeyError(
+                f"{package_path} has no public export called {wanted!r}. "
+                f"It offers: {', '.join(sorted(exports)) or 'none'}"
+            ) from None
 
     def has_package(self, package_path: str) -> bool:
         """Whether the game has this package at all."""

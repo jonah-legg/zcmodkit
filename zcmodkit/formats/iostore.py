@@ -16,6 +16,7 @@ from blake3 import blake3
 from cityhash import CityHash64
 
 from . import oodle
+from .pak import PakWriter
 
 TOC_MAGIC = b"-==--==--==--==-"
 HEADER_SIZE = 144
@@ -186,12 +187,42 @@ class IoStoreReader:
 
         self.by_package: dict[int, Chunk] = {}
         self._all_by_package: dict[int, list[Chunk]] = {}
+        self._store: dict[int, list[int]] | None = None
         for c in self.chunks:
             if c.type == CHUNK_CONTAINER_HEADER:
                 continue
             self._all_by_package.setdefault(c.package_id, []).append(c)
             if c.type == CHUNK_EXPORT_BUNDLE_DATA:
                 self.by_package.setdefault(c.package_id, c)
+
+    def imported_packages(self, pkg_id: int) -> list[int]:
+        """The package ids this package depends on, from the container header.
+
+        The Zen loader uses this to pull dependencies in first. Ship a package
+        claiming no imports when it has some and it quietly fails to load, so a
+        mod has to carry the real list through.
+        """
+        if self._store is None:
+            self._store = self._read_store_entries()
+        return list(self._store.get(pkg_id, ()))
+
+    def _read_store_entries(self) -> dict[int, list[int]]:
+        header = next(
+            (c for c in self.chunks if c.type == CHUNK_CONTAINER_HEADER), None
+        )
+        if header is None:
+            return {}
+        d = self.read_chunk(header)
+        (count,) = struct.unpack_from("<I", d, 16)
+        ids = struct.unpack_from(f"<{count}Q", d, 20)
+        entries_at = 20 + count * 8 + 4
+        out: dict[int, list[int]] = {}
+        for i, pid in enumerate(ids):
+            at = entries_at + i * 16
+            num, offset = struct.unpack_from("<ii", d, at)
+            if num:
+                out[pid] = list(struct.unpack_from(f"<{num}Q", d, at + offset))
+        return out
 
     def chunks_for(self, pkg_id: int) -> list[Chunk]:
         """Every chunk a package owns, not just its export data.
@@ -252,34 +283,63 @@ class IoStoreReader:
 
 
 # The rest of FIoContainerHeader after the store entries. Optional segment
-# arrays and name map fields, all constant for a simple one-partition mod.
-_HEADER_TAIL = bytes.fromhex(
-    "00000000"
-    "00000000"
-    "00000000"
-    "00000000"
-    "00000000"
-    "54000000"
-    "00000000"
-    "04000000"
-    "00000000"
-    "00000000"
-    "00000000"
-    "00000000"
-)
+# arrays, then an offset into the trailing bytes, then constants. The offset is
+# always 36 past the end of the store section, checked against every container
+# the game ships and against a working community mod.
+_TAIL_OFFSET_FROM_STORE_END = 36
 
 
-def container_header(container_id: int, package_ids: list[int]) -> bytes:
-    """Build the type 6 container header chunk."""
+def _header_tail(store_end: int) -> bytes:
+    """The bytes that follow the store entries in a container header."""
+    out = bytearray(20)  # empty optional-segment arrays
+    out += struct.pack("<i", store_end + _TAIL_OFFSET_FROM_STORE_END)
+    out += struct.pack("<i", 0)
+    out += struct.pack("<i", 4)
+    out += bytes(16)
+    return bytes(out)
+
+
+def container_header(
+    container_id: int, packages: Sequence[tuple[int, Sequence[int]]]
+) -> bytes:
+    """Build the type 6 container header chunk.
+
+    `packages` is (package id, imported package ids) for each package. The
+    imports matter: the loader reads them to pull dependencies in first, and a
+    package that claims none when it has some will not load.
+    """
+    # The loader looks packages up by binary search, so the ids have to be in
+    # ascending order and the store entries have to line up with them. Every
+    # container the game ships is sorted this way.
+    packages = sorted(packages, key=lambda item: item[0])
+
     out = bytearray(b"nCoI")
     out += struct.pack("<I", 5)  # version
     out += struct.pack("<Q", container_id)
-    out += struct.pack("<I", len(package_ids))
-    for pid in package_ids:
+    out += struct.pack("<I", len(packages))
+    for pid, _ in packages:
         out += struct.pack("<Q", pid)
-    store = bytes(16) * len(package_ids)  # one empty store entry each
+
+    # Each FFilePackageStoreEntry is two array views of (count, offset), and the
+    # offset is measured from the view itself. The arrays they point at follow
+    # the entries.
+    entries = bytearray()
+    data = bytearray()
+    entries_size = len(packages) * 16
+    for i, (_, imports) in enumerate(packages):
+        view_at = i * 16
+        if imports:
+            offset = entries_size + len(data) - view_at
+            entries += struct.pack("<ii", len(imports), offset)
+            for imported in imports:
+                data += struct.pack("<Q", imported)
+        else:
+            entries += struct.pack("<ii", 0, 0)
+        entries += struct.pack("<ii", 0, 0)  # no shader map hashes
+
+    store = bytes(entries) + bytes(data)
     out += struct.pack("<I", len(store)) + store
-    out += _HEADER_TAIL
+    out += _header_tail(len(out))
     return bytes(out)
 
 
@@ -312,7 +372,7 @@ class IoStoreWriter:
         self.block_size = block_size
         #: (chunk id, payload, directory-index name or None)
         self._entries: list[tuple[bytes, bytes, str | None]] = []
-        self._package_ids: list[int] = []
+        self._packages: list[tuple[int, Sequence[int]]] = []
 
     def add_package(
         self,
@@ -320,16 +380,20 @@ class IoStoreWriter:
         data: bytes,
         filename: str | None = None,
         companions: Sequence[tuple[bytes, bytes]] = (),
+        imports: Sequence[int] = (),
     ) -> None:
         """Add a cooked package under its /Game/... path.
 
         `companions` is any other chunk the package owns, usually bulk data,
         as (chunk id, payload) pairs. Ship them. Leave them out and the game
         gets a package whose bulk data has gone missing.
+
+        `imports` is the package ids this one depends on, copied from the game's
+        own container header. Leave them out and the package will not load.
         """
         pid = package_id(package_path)
         name = filename or package_path.rsplit("/", 1)[-1] + ".uasset"
-        self._package_ids.append(pid)
+        self._packages.append((pid, tuple(imports)))
         self._entries.append((chunk_id(pid), data, name))
         for cid, payload in companions:
             self._entries.append((cid, payload, None))
@@ -349,14 +413,21 @@ class IoStoreWriter:
             out += _wstr(name)
         return bytes(out)
 
-    def write(self, base: str | Path) -> tuple[Path, Path, Path]:
-        """Write out .utoc, .ucas and .pak, and give back the three paths."""
+    def write(
+        self, base: str | Path, pak_files: dict[str, bytes] | None = None
+    ) -> tuple[Path, Path, Path]:
+        """Write out .utoc, .ucas and .pak, and give back the three paths.
+
+        `pak_files` puts real files in the .pak that normally goes out empty.
+        Assets belong in the container, not here, but a few things the engine
+        wants are plain files rather than packages.
+        """
         base = Path(base)
         base.parent.mkdir(parents=True, exist_ok=True)
         bs = self.block_size
 
         payloads = [d for _, d, _ in self._entries]
-        payloads.append(container_header(self.container_id, self._package_ids))
+        payloads.append(container_header(self.container_id, self._packages))
         ids = [cid for cid, _, _ in self._entries]
         ids.append(chunk_id(self.container_id, 0, CHUNK_CONTAINER_HEADER))
 
@@ -416,5 +487,11 @@ class IoStoreWriter:
         utoc.write_bytes(bytes(toc))
         ucas_p.write_bytes(bytes(ucas))
         pak = base.with_suffix(".pak")
-        pak.write_bytes(_stub_pak())
+        if pak_files:
+            builder = PakWriter()
+            for name, blob in pak_files.items():
+                builder.add(name, blob)
+            builder.write(pak)
+        else:
+            pak.write_bytes(_stub_pak())
         return utoc, ucas_p, pak
