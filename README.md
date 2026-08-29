@@ -183,7 +183,6 @@ The `examples/` folder has working mods you can run as they are:
 | File | What it does |
 | --- | --- |
 | `mod_test_poc.py` | Changes a main menu button. The smallest useful mod. |
-| `cheaper_actions.py` | Drops ability costs in a DataTable. |
 | `classes_unlocked.py` | Opens up the Jedi and Mandalorian specialisations for everyone. |
 
 ## Requirements

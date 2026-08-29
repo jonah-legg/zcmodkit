@@ -2,21 +2,25 @@
 
     python examples/classes_unlocked.py
 
-Padawan and Wayseeker belong to Tel-Rea Vokoss. Warrior and Combat Jump belong
-to Cly Kullervo. Each is held back the same way: the part lists a tag in
-AllowedSlots that only its owner carries, and the game offers a part only when
-the slot carries every tag the part asks for.
+Four classes are locked to their owners:
 
-The fix has to happen on the character side. What the picker offers comes from
-the copy of AllowedSlots cached in AssetRegistry.bin, not from the asset, so
-editing the part changes nothing at all. Handing every character the name tags
-those parts ask for does work, and that is what this does, adding them to the
-name parts next to the character's own.
+    Padawan and Wayseeker    Tel-Rea Vokoss
+    Warrior and Combat Jump  Cly Kullervo
 
-BP_SpecializationSelectionVM also holds a map of primary specialisation to
-secondary. A class the map does not mention has nothing to pair with, so
-Padawan gets an entry and Warrior gets one with no secondary, which is what
-Cly's own definition does.
+All four are held back the same way. The part lists a tag in AllowedSlots that
+only its owner carries, and a part is offered only when the slot carries every
+tag the part asks for.
+
+The fix has to happen on the character side. What the picker offers is read
+from the copy of AllowedSlots cached in AssetRegistry.bin rather than from the
+asset, so editing the part changes nothing at all. Handing every character the
+name tags those parts ask for does work, and that is what this does, adding
+them to the name parts beside the character's own.
+
+There is a second half to it. BP_SpecializationSelectionVM holds a map of
+primary specialisation to secondary, and a class the map does not mention has
+nothing to pair with. Padawan gets an entry pointing at Wayseeker, Warrior gets
+one pointing at nothing, which is what Cly's own definition does.
 
 Worth knowing before you run it: a character's customization is written into
 the save when they join, so this only reaches characters built afterwards. New
@@ -26,20 +30,29 @@ campaigns and new recruits pick it up. The squad you already have will not.
 import zcmodkit
 from zcmodkit.formats.iostore import package_id
 
+# ---------------------------------------------------------------------------
+# What we are changing
+# ---------------------------------------------------------------------------
+
 TACTICAL = "/Game/Game/Customizations/Characters/Common/Specialization/Tactical/"
 VIEW_MODEL = (
     "/Game/Game/UI/Strategy/Personnel/FocusTree/BP/BP_SpecializationSelectionVM"
 )
 
+PADAWAN = TACTICAL + "CPD_TacticalSpec_Padawan"
+WAYSEEKER = TACTICAL + "CPD_TacticalSpec_PadawanExtended"
+WARRIOR = TACTICAL + "CPD_TacticalSpec_Warrior"
+
 #: The tags the locked classes ask for. Give these to a character and the
-#: classes their owners hold become available.
-WANTED = (
+#: classes their owners hold become available to them.
+WANTED_TAGS = (
     "br.Customization.Part.Character.Info.Name.Tel-ReaVokoss",
     "br.Customization.Part.Character.Info.Name.ClyKullervo",
 )
 
-#: Where a character's own name tag lives.
-NAME_PREFIX = "br.Customization.Part.Character.Info.Name."
+#: Every name tag lives under here, including the one each character already
+#: has. That existing tag is what we hang the new ones next to.
+NAME_TAG_PREFIX = "br.Customization.Part.Character.Info.Name."
 
 #: Every container that has loaded in this game holds at least one package with
 #: no imports, and one where everything has imports has never loaded. Why is
@@ -48,16 +61,27 @@ NAME_PREFIX = "br.Customization.Part.Character.Info.Name."
 ANCHOR_A = "/Game/Game/GameData/DynamicGACosts/DT_CostsTable_v4"
 ANCHOR_B = "/Game/Game/FX/Data/STRUCT_FX_DS_Destroy"
 
+
 kit = zcmodkit.open()
 
 
+# ---------------------------------------------------------------------------
+# Half one: hand every character the name tags the locked classes ask for
+# ---------------------------------------------------------------------------
+
+
 def name_parts():
-    """Every CPD_H_Name_* package, by its /Game/... path."""
+    """Every CPD_H_Name_* package, by its /Game/... path.
+
+    The two containers mount at different points, so the path is worked out by
+    trying both shapes and keeping whichever one the container knows about.
+    """
     for reader in kit.containers:
         for filename in reader.files:
             base = filename.rsplit("/", 1)[-1]
             if not base.startswith("CPD_H_Name_") or not filename.endswith(".uasset"):
                 continue
+
             stripped = filename.removesuffix(".uasset")
             for guess in (
                 "/" + stripped.replace("SWZeroCompany/Content", "Game"),
@@ -70,15 +94,19 @@ def name_parts():
 
 specs = kit.create_mod("classes_unlocked", priority=10)
 tagged = 0
+
 for path in sorted(set(name_parts())):
     editor = specs.asset(path)
-    # Anchor on whatever name tag the part already grants. Parts granting none
-    # are the procedural recruit pool, and there is nothing to sit beside.
-    anchors = [n for n in editor.names if n.startswith(NAME_PREFIX)]
+
+    # Hang the new tags off whatever name tag the part already grants. Parts
+    # granting none are the procedural recruit pool, and there is nothing there
+    # to sit beside.
+    anchors = [name for name in editor.names if name.startswith(NAME_TAG_PREFIX)]
     if len(anchors) != 1:
         continue
+
     try:
-        for tag in WANTED:
+        for tag in WANTED_TAGS:
             if tag not in editor.names:
                 editor.add_gameplay_tag(anchors[0], tag, expect=1)
     except ValueError:
@@ -86,30 +114,42 @@ for path in sorted(set(name_parts())):
         # once as a requirement. Guessing which container to grow would be a
         # coin flip, so leave those alone.
         continue
+
     tagged += 1
+
 specs.asset(ANCHOR_A)
 
-# Adding imports grows the header, so find the map again each time rather than
-# holding on to an offset from before it moved. The entry count is what keeps
-# the search honest.
+
+# ---------------------------------------------------------------------------
+# Half two: give the picker's map an entry for each new class
+# ---------------------------------------------------------------------------
+
 picker = kit.create_mod("classes_picker", priority=20)
 view_model = picker.asset(VIEW_MODEL)
 
-padawan = TACTICAL + "CPD_TacticalSpec_Padawan"
-extended = TACTICAL + "CPD_TacticalSpec_PadawanExtended"
-warrior = TACTICAL + "CPD_TacticalSpec_Warrior"
+# The view model has never referenced these three, so each needs an import
+# before the map can point at it.
+padawan_ref = view_model.add_import(PADAWAN, kit.public_export_hash(PADAWAN))
+wayseeker_ref = view_model.add_import(WAYSEEKER, kit.public_export_hash(WAYSEEKER))
+warrior_ref = view_model.add_import(WARRIOR, kit.public_export_hash(WARRIOR))
 
-pad_key = view_model.add_import(padawan, kit.public_export_hash(padawan))
-pad_value = view_model.add_import(extended, kit.public_export_hash(extended))
-war_key = view_model.add_import(warrior, kit.public_export_hash(warrior))
-
+# Adding those imports grew the header, so look the map up again each time
+# rather than holding on to an offset from before it moved. Asking for a
+# specific entry count is what keeps the search honest.
 view_model.find_object_map(entries=8, referencing="CPD_TacticalSpec_Scout").append(
-    pad_key, pad_value
+    padawan_ref, wayseeker_ref
 )
 view_model.find_object_map(entries=9, referencing="CPD_TacticalSpec_Padawan").append(
-    war_key, None
+    warrior_ref,
+    None,  # Warrior has no secondary
 )
+
 picker.asset(ANCHOR_B)
+
+
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
 
 print(f"name parts tagged: {tagged}")
 for mod in (specs, picker):
