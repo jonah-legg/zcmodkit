@@ -197,6 +197,61 @@ VIEW_MODEL = (
 LOCK_TAG = "br.Customization.Part.Character.Info.Name"
 NOBODY = "br.Customization.Part.Character.Info.Name.Nobody"
 
+#: The armory reads Tel-Rea's name off the character and refuses to let her
+#: touch her weapon - "Tel-Rea cannot modify her weapon", which is a strange
+#: thing to be told while holding a blaster. It is her name that does it, not
+#: the lightsaber: the widget carries her name tag in its name map and the
+#: item-side rule beside it (ALL(Item.UIType), NONE(Item.UIType.Lightsaber))
+#: had already passed. Hawks needs her name for the host, so the check is what
+#: gives, pointed at the same nobody the selection lock uses. One reference.
+#:
+#: Which cannot be done. Shipping this widget at all stops the container
+#: loading, retarget or no retarget, and the tell is the respec lock coming
+#: back: with the mod gone the vanilla Info.Name query is live again and Hawks
+#: freezes solid. Tested alone, so it is the package and not the edit.
+#:
+#: So the lock stays. Hawks cannot modify or change his weapon in the armory,
+#: and is told he is Tel-Rea while being refused.
+ARMORY = "/Game/Game/UI/Strategy/Armory/WBP_Menu_Armory_WeaponLanding"
+
+#: What the host says it is, and what it should say instead.
+#:
+#: CPD_TacticalSpec_Padawan and CPD_TacticalSpec_Padawan_SlugHQ grant the same
+#: single tag, so once the host reads as the Jedi Knight there are two entries
+#: in the list claiming to be the same class. Picking one while the other is
+#: equipped changes nothing; going out to Sharpshooter and back works, because
+#: that really is a different tag. Anakin's own spec grants Tactical.Anakin, so
+#: that is both a real tag and the honest name for what this is.
+#:
+#: Tel-Rea keeps Tactical.Padawan everywhere except the one story stage that
+#: uses the SlugHQ variant.
+IDENTITY = "br.Customization.Part.Character.Specializations.Tactical.Padawan"
+IDENTITY_ANAKIN = "br.Customization.Part.Character.Specializations.Tactical.Anakin"
+
+#: What each of the host's three tree nodes calls itself, and what it should
+#: call itself instead.
+#:
+#: This is what stops the class swapping. Equipping works - the card changes
+#: name - but the abilities do not follow, and they stay wrong even after
+#: leaving the screen. Going out to Sharpshooter and back fixes it.
+#:
+#: A levelled node is keyed by its BaseAbilityTag, and the host declares the
+#: same three as the plain Padawan sitting beside it in the list. Swapping
+#: between two specs that claim the same ability ids leaves the character
+#: already holding all three, so nothing is regranted and the old assets stay.
+#: Sharpshooter clears them, which is why the detour works.
+#:
+#: The ids are only keys - the node's name and icon come from the ability asset
+#: - so these need to be registered tags that the Padawan does not use, and
+#: two of the three are the ones Anakin's own abilities carry. Force Push has
+#: to borrow its sibling's id, because Anakin's Force Push and the Padawan's
+#: declare the same one and that is the collision being broken.
+ABILITY_IDS = {
+    "br.AbilityID.Class.Shockwave": "br.AbilityID.Class.LightsaberThrow",
+    "br.AbilityID.Class.ForcePush": "br.AbilityID.Class.ForcePull",
+    "br.AbilityID.Passive.PadawanPassives": "br.AbilityID.Passive.PadawanMeditation",
+}
+
 #: Every container that has loaded in this game holds at least one package with
 #: no imports, and one where everything has imports has never loaded. Why is
 #: not worked out, so the container carries a spare package to stay on the side
@@ -393,6 +448,18 @@ for before, after in swaps:
         raise ValueError("an ability reference went missing before it was written")
     host.data[where : where + len(after)] = after
     host.changes += 1
+
+# Last, so the offsets above are worked out before anything else moves: stop it
+# claiming to be the same class as the Padawan it sits next to.
+host.add_name(IDENTITY_ANAKIN)
+host.retarget_name(IDENTITY, IDENTITY_ANAKIN, expect=1)
+
+# And stop its three tree nodes claiming the Padawan's ability ids, so that
+# swapping between the two actually regrants anything.
+for was_id, now_id in ABILITY_IDS.items():
+    host.add_name(now_id)
+    host.retarget_name(was_id, now_id, expect=1)
+
 
 
 mod.asset(ANCHOR)
