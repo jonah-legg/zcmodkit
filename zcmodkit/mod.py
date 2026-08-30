@@ -25,6 +25,12 @@ class Mod:
         self.priority = priority
         self._assets: dict[str, AssetEditor] = {}
         self._tables: dict[str, DataTable] = {}
+        #: Where a copied package came from, so the builder can still find the
+        #: companion chunks, which belong to the source and not to the new path.
+        self._sources: dict[str, str] = {}
+        #: Plain files for the .pak that normally ships empty. Assets belong in
+        #: the container; this is for the few things the engine reads as files.
+        self._pak_files: dict[str, bytes] = {}
 
     @property
     def basename(self) -> str:
@@ -38,8 +44,10 @@ class Mod:
 
     @property
     def changes(self) -> int:
-        return sum(a.changes for a in self._assets.values()) + sum(
-            t.changes for t in self._tables.values()
+        return (
+            sum(a.changes for a in self._assets.values())
+            + sum(t.changes for t in self._tables.values())
+            + len(self._pak_files)
         )
 
     def asset(self, package_path: str) -> AssetEditor:
@@ -52,6 +60,28 @@ class Mod:
             )
         return self._assets[package_path]
 
+    def copy_asset(self, package_path: str, source_path: str) -> AssetEditor:
+        """Ship a copy of an existing package under a path of your own.
+
+        The game has no package at `package_path`, so this is how a mod adds
+        one rather than replacing one. The copy keeps the source's exports,
+        its object names and its imports; only the path it answers to is new.
+
+        Which means the object inside still carries the source's name, and a
+        soft reference is a package and an object name, so point at it as
+        `/Your/New/Path.OriginalObjectName`. Renaming the object as well would
+        mean recomputing the public export hash, which is not something this
+        kit can do yet.
+        """
+        if package_path not in self._assets:
+            self._assets[package_path] = AssetEditor(
+                package_path,
+                self.kit.read_package(source_path),
+                self.kit.imported_packages(source_path),
+            )
+            self._sources[package_path] = source_path
+        return self._assets[package_path]
+
     def table(self, package_path: str) -> DataTable:
         """Open a cooked DataTable for editing, by its /Game/... package path."""
         if package_path not in self._tables:
@@ -59,6 +89,18 @@ class Mod:
                 package_path, bytearray(self.kit.read_package(package_path))
             )
         return self._tables[package_path]
+
+    def add_pak_file(self, path: str, data: bytes) -> None:
+        """Ship a plain file in the mod's .pak, at a path like
+        'SWZeroCompany/AssetRegistry.bin'.
+
+        The .pak mounts at ../../../, the same place the game's own
+        pakchunk0-Windows.pak mounts, so a file here sits on top of the one the
+        game ships at that path. Almost everything belongs in the container
+        instead; this is for what the engine loads as a file rather than as a
+        package.
+        """
+        self._pak_files[path.replace("\\", "/")] = bytes(data)
 
     def build(
         self, out_dir: str | Path = "./build", verify: bool = False
@@ -73,7 +115,7 @@ class Mod:
         # add_import can grow an asset's import list, so take it from the
         # editor where there is one rather than going back to the game.
         imports = {p: a.imported_packages for p, a in self._assets.items()}
-        if not edits:
+        if not edits and not self._pak_files:
             raise ValueError("Mod has no changes; nothing to build.")
         writer = IoStoreWriter(container_id=package_id(f"/zcmodkit/{self.name}"))
         for path, data in edits.items():
@@ -82,13 +124,18 @@ class Mod:
                     zen_verify(data)
                 except PackageError as exc:
                     raise PackageError(f"{path}: {exc}") from exc
+            # A copied package has no companions of its own; they belong to
+            # whatever it was copied from.
+            origin = self._sources.get(path, path)
             writer.add_package(
                 path,
                 data,
-                companions=self.kit.read_companions(path),
-                imports=imports.get(path) or self.kit.imported_packages(path),
+                companions=self.kit.read_companions(origin),
+                imports=imports.get(path) or self.kit.imported_packages(origin),
             )
-        return list(writer.write(Path(out_dir) / self.basename))
+        return list(
+            writer.write(Path(out_dir) / self.basename, pak_files=self._pak_files)
+        )
 
     def install(self) -> list[Path]:
         """Build the mod and drop it into the game's ~mods folder."""

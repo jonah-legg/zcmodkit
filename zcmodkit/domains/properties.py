@@ -129,6 +129,33 @@ def read_header(data: bytes, at: int) -> tuple[list[int], list[bool], int]:
 
 #: Structs Unreal writes with its own code instead of as properties.
 #: Sizes are what they take up in cooked data.
+def write_header(present: list[int]) -> bytes:
+    """Build an unversioned header listing exactly these schema indices.
+
+    Runs of consecutive indices share a fragment, which is what the cooker
+    does. No zero mask is written, so every property named here has to have a
+    value after it.
+    """
+    out = bytearray()
+    index = 0
+    i = 0
+    while i < len(present):
+        skip = present[i] - index
+        run = 1
+        while i + run < len(present) and present[i + run] == present[i] + run:
+            run += 1
+        if not 0 <= skip <= 127 or not 1 <= run <= 127:
+            raise PropertyError(
+                f"cannot encode a fragment skipping {skip} with {run} values"
+            )
+        index = present[i] + run
+        is_last = i + run >= len(present)
+        out += struct.pack("<H", skip | (0x100 if is_last else 0) | (run << 9))
+        i += run
+    return bytes(out)
+
+
+#: Structs Unreal writes with its own code instead of as properties.
 NATIVE_STRUCTS = {
     "GameplayTag": 8,  # a single FName
     "Guid": 16,
@@ -148,6 +175,44 @@ def _fname(data: bytes, at: int) -> tuple[int, int]:
     return struct.unpack_from("<II", data, at)
 
 
+def _fstring_size(data: bytes, at: int) -> int:
+    """An FString: a length, then that many characters. Negative means UTF-16."""
+    (length,) = struct.unpack_from("<i", data, at)
+    return 4 + (abs(length) * 2 if length < 0 else length)
+
+
+#: ETextHistoryType values. An FText is a flags word, a history type, and then
+#: whatever that history keeps. Only the three the game's cooked data uses are
+#: here; the rest raise rather than guess, because a wrong size walks the rest
+#: of the export off into nothing.
+TEXT_HISTORY_NONE = 0xFF
+TEXT_HISTORY_BASE = 0
+TEXT_HISTORY_STRING_TABLE_ENTRY = 11
+
+
+def _text_size(data: bytes, at: int) -> int:
+    """How many bytes the FText at `at` takes up."""
+    cursor = at + 4  # flags
+    (history,) = struct.unpack_from("<B", data, cursor)
+    cursor += 1
+    if history == TEXT_HISTORY_NONE:
+        (has_string,) = struct.unpack_from("<I", data, cursor)
+        cursor += 4
+        if has_string:
+            cursor += _fstring_size(data, cursor)
+    elif history == TEXT_HISTORY_BASE:
+        for _ in range(3):  # namespace, key, source string
+            cursor += _fstring_size(data, cursor)
+    elif history == TEXT_HISTORY_STRING_TABLE_ENTRY:
+        cursor += 8  # the table's FName
+        cursor += _fstring_size(data, cursor)  # the key within it
+    else:
+        raise PropertyError(
+            f"text history type {history} at {at} is not one this reads yet"
+        )
+    return cursor - at
+
+
 def value_size(data: bytes, at: int, info, mappings: Mappings) -> int:
     """How many bytes the value at `at` takes up."""
     kind = info.kind
@@ -165,8 +230,9 @@ def value_size(data: bytes, at: int, info, mappings: Mappings) -> int:
             return NATIVE_STRUCTS[name]
         raise PropertyError(f"struct {name!r} has no schema and is not a known native")
     if kind == PropertyType.STR:
-        (length,) = struct.unpack_from("<i", data, at)
-        return 4 + (abs(length) * 2 if length < 0 else length)
+        return _fstring_size(data, at)
+    if kind == PropertyType.TEXT:
+        return _text_size(data, at)
     if kind in (PropertyType.SOFT_OBJECT, PropertyType.ASSET_OBJECT):
         return 12  # FName plus a sub-path FString index
     if kind == PropertyType.INTERFACE:

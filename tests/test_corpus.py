@@ -242,3 +242,35 @@ def test_adding_an_import_keeps_every_other_one_pointing_where_it_did(kit):
 
     assert tested > 50, f"only {tested} packages had imports to work with"
     assert inserted_in_the_middle > 20, "never hit the case that needs renumbering"
+
+
+def test_added_property_lands_in_front_of_the_export_tail(kit):
+    """A new value goes after the last one, not after the export.
+
+    Every export carries a few bytes behind its property values, and a value
+    written past those is never read. It parses back or it does not, so read
+    the whole fragment again and check the icon is where it says it is.
+    """
+    from zcmodkit.domains.properties import read_struct
+
+    path = (
+        "/Game/Game/Customizations/Characters/Humanoid/Outfit/Anakin/"
+        "CPD_H_Outfit_Anakin_TORS"
+    )
+    editor = AssetEditor(path, kit.read_package(path))
+    tag = editor.add_name("ImageBank.Icon.Class.Jedi")
+    icon = struct.pack("<HHII", 0x0301, 0x0300, tag, 0)
+
+    export = 0  # the UI data fragment
+    editor.add_property(export, 4, icon)  # SmallImage
+
+    entry = editor.package.exports[export]
+    at = editor.package.header_size + entry.offset
+    props, values_end = read_struct(
+        bytes(editor.data), at, "BitReactorUIDataFragment", editor.mappings
+    )
+    small = props["SmallImage"]
+    assert struct.unpack_from("<II", editor.data, small.offset + 4) == (tag, 0)
+    # The tail the export already had is still the last thing in it.
+    assert values_end + 4 == at + entry.size
+    verify(bytes(editor.data))

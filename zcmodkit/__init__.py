@@ -173,6 +173,17 @@ class ModKit:
         with PakReader(self.paks / _BASE_PAK) as pak:
             return LocRes.loads(pak.read(_LOCRES))
 
+    def paks_file(self, path: str) -> bytes:
+        """Read a plain file out of the game's main pak.
+
+        Not everything the engine reads is a package. AssetRegistry.bin is the
+        one that matters for modding: it is where the customizer gets its list
+        of parts and their AllowedSlots, so it is the only place a part's gate
+        can actually be changed.
+        """
+        with PakReader(self.paks / _BASE_PAK) as pak:
+            return pak.read(path)
+
     def create_mod(self, name: str, priority: int = DEFAULT_PRIORITY) -> Mod:
         """Start a new mod. `priority` settles who wins if two mods clash."""
         return Mod(self, name, priority)

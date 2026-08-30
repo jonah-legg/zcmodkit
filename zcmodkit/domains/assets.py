@@ -6,6 +6,7 @@ import struct
 from dataclasses import dataclass
 
 from ..formats.iostore import package_id
+from ..formats.usmap import Mappings, bundled
 from ..formats.zen import (
     EXPORT_ENTRY_SIZE,
     IMPORT_PACKAGE,
@@ -18,6 +19,7 @@ from ..formats.zen import (
     split_import,
     write_name_map,
 )
+from .properties import read_header, skip_struct, write_header
 
 
 class AssetEditor:
@@ -29,11 +31,18 @@ class AssetEditor:
     """
 
     def __init__(
-        self, package_path: str, data: bytes, imported_packages: list[int] | None = None
+        self,
+        package_path: str,
+        data: bytes,
+        imported_packages: list[int] | None = None,
+        mappings: Mappings | None = None,
     ):
         self.package_path = package_path
         self.data = bytearray(data)
         self.changes = 0
+        # Only add_property needs these, to walk to the end of an export's
+        # values. Everything else here works on bytes alone.
+        self.mappings = mappings or bundled()
         # The ids of the packages this one imports live in the container header
         # rather than the package, so they get carried alongside. add_import
         # adds to this list and the builder ships whatever is here.
@@ -381,22 +390,9 @@ class AssetEditor:
             raise KeyError(f"{beside!r} is not in the name map of {self.package_path}")
         anchor = names.index(beside)
 
-        start, end = self.package.export_data_range()
-        needle = struct.pack("<II", anchor, 0)
-        hits, at = [], start
-        while (i := self.data.find(needle, at, end)) >= 0:
-            hits.append(i)
-            at = i + 1
-        if expect is not None and len(hits) != expect:
-            raise ValueError(
-                f"expected {expect} container(s) holding {beside!r} in "
-                f"{self.package_path}, found {len(hits)}"
-            )
-        if not hits:
-            raise KeyError(f"{beside!r} is in the name map but never referenced")
-
-        for pos in reversed(hits):
-            count_at, count = self._tag_container_count(pos, start)
+        hits = self._tag_containers_holding(anchor, beside, expect)
+        for pos, count_at, count in reversed(hits):
+            del pos
             struct.pack_into("<i", self.data, count_at, count + 1)
             after = count_at + 4 + count * 8
             self.splice_export_data(after, 0, struct.pack("<II", index, 0))
@@ -420,26 +416,42 @@ class AssetEditor:
             raise KeyError(f"{tag!r} is not in the name map of {self.package_path}")
         index = names.index(tag)
 
-        start, end = self.package.export_data_range()
-        needle = struct.pack("<II", index, 0)
-        hits, at = [], start
-        while (i := self.data.find(needle, at, end)) >= 0:
-            hits.append(i)
-            at = i + 1
-        if expect is not None and len(hits) != expect:
-            raise ValueError(
-                f"expected {expect} container(s) holding {tag!r} in "
-                f"{self.package_path}, found {len(hits)}"
-            )
-        if not hits:
-            raise KeyError(f"{tag!r} is in the name map but never referenced")
-
+        hits = self._tag_containers_holding(index, tag, expect)
         # Work backwards so the offsets found above stay put.
-        for pos in reversed(hits):
-            count_at, count = self._tag_container_count(pos, start)
+        for pos, count_at, count in reversed(hits):
             struct.pack_into("<i", self.data, count_at, count - 1)
             self.splice_export_data(pos, 8, b"")
         return self
+
+    def _tag_containers_holding(
+        self, index: int, label: str, expect: int | None
+    ) -> list[tuple[int, int, int]]:
+        """Every counted container that holds the name at `index`.
+
+        A name can turn up in export data without being part of a container at
+        all. UI data fragments carry loose tag references, for example. Those
+        are not something to grow or shrink, so anything that does not sit in a
+        container with a sane count in front of it gets left out.
+        """
+        start, end = self.package.export_data_range()
+        needle = struct.pack("<II", index, 0)
+        found, at = [], start
+        while (i := self.data.find(needle, at, end)) >= 0:
+            at = i + 1
+            try:
+                count_at, count = self._tag_container_count(i, start)
+            except ValueError:
+                continue
+            found.append((i, count_at, count))
+
+        if expect is not None and len(found) != expect:
+            raise ValueError(
+                f"expected {expect} container(s) holding {label!r} in "
+                f"{self.package_path}, found {len(found)}"
+            )
+        if not found:
+            raise KeyError(f"{label!r} is in the name map but never in a container")
+        return found
 
     def _tag_container_count(self, entry_at: int, start: int) -> tuple[int, int]:
         """Where the count of the container holding this entry sits, and its value.
@@ -469,6 +481,81 @@ class AssetEditor:
             f"could not find the container holding the tag at {entry_at} in "
             f"{self.package_path}"
         )
+
+    def export_schema(self, export_index: int) -> str:
+        """The mappings schema for an export, guessed from its object name.
+
+        Unreal names a sub-object after its class with a number on the end, so
+        BitReactorUIDataFragment_0 is a BitReactorUIDataFragment. The class the
+        export map points at cannot be read here, because a class that lives in
+        script is stored as a hash of its path and there is nothing in the
+        package to turn that back into a name. The name is the next best thing,
+        and anything it does not cover can be named outright.
+        """
+        at = self.package.export_entry_offset(export_index)
+        (name_index,) = struct.unpack_from("<I", self.data, at + 16)
+        name = self.names[name_index]
+        for candidate in (name, name.rsplit("_", 1)[0]):
+            if candidate in self.mappings.schemas:
+                return candidate
+        raise KeyError(
+            f"no schema in the mappings for export {export_index} "
+            f"({name!r}) of {self.package_path}; pass schema= to say which"
+        )
+
+    def add_property(
+        self,
+        export_index: int,
+        schema_index: int,
+        value: bytes,
+        schema: str | None = None,
+    ) -> AssetEditor:
+        """Add a property that the export does not currently serialise.
+
+        Cooked exports only store the properties that were set, and which ones
+        those are is a bitmask in front of the values. Adding one means
+        rewriting that header as well as making room for the value.
+
+        The value goes after the last one already there, so this only handles a
+        property that sorts after everything present. That covers the usual case
+        of filling in something the authors left blank, and refuses rather than
+        guessing when it does not.
+
+        Where the values finish is not where the export finishes. Every export
+        carries a few bytes behind them that are nothing to do with properties,
+        four for the fragments this is used on and rather more for anything
+        with its own serialisation. So the end has to be walked to, property by
+        property, which is what the schema is for.
+        """
+        export = self.package.exports[export_index]
+        at = self.package.header_size + export.offset
+        present, zeroed, values_at = read_header(bytes(self.data), at)
+
+        if schema_index in present:
+            raise ValueError(
+                f"export {export_index} already has a property at schema index "
+                f"{schema_index}; change it rather than adding it"
+            )
+        if any(zeroed):
+            raise ValueError(
+                "this export marks some properties as zeroed, which means a "
+                "zero mask this cannot rebuild yet"
+            )
+        if any(p > schema_index for p in present):
+            raise ValueError(
+                f"schema index {schema_index} sorts before properties already "
+                "there, and the value can only go on the end"
+            )
+
+        # Walk to the end of the values while the header still describes them.
+        schema = schema or self.export_schema(export_index)
+        values_end = skip_struct(bytes(self.data), at, schema, self.mappings)
+
+        header = write_header([*present, schema_index])
+        moved = len(header) - (values_at - at)
+        self.splice_export_data(at, values_at - at, header)
+        self.splice_export_data(values_end + moved, 0, value)
+        return self
 
     def _shift_exports(self, rel_pos: int, delta: int) -> None:
         """Resize the export holding rel_pos, and move the ones after it."""
